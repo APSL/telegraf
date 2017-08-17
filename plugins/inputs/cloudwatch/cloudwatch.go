@@ -318,6 +318,16 @@ func (c *CloudWatch) gatherMetric(
 			fields[formatField(*metric.MetricName, cloudwatch.StatisticSum)] = *point.Sum
 		}
 
+		if point.ExtendedStatistics["p99"] != nil {
+			fields[formatField(*metric.MetricName, "Percentile99")] = *point.ExtendedStatistics["p99"]
+		}
+		if point.ExtendedStatistics["p95"] != nil {
+			fields[formatField(*metric.MetricName, "Percentile95")] = *point.ExtendedStatistics["p95"]
+		}
+		if point.ExtendedStatistics["p50"] != nil {
+			fields[formatField(*metric.MetricName, "Percentile50")] = *point.ExtendedStatistics["p50"]
+		}
+
 		acc.AddFields(formatMeasurement(c.Namespace), fields, tags, *point.Timestamp)
 	}
 
@@ -362,6 +372,11 @@ func (c *CloudWatch) getStatisticsInput(metric *cloudwatch.Metric, now time.Time
 			aws.String(cloudwatch.StatisticMinimum),
 			aws.String(cloudwatch.StatisticSum),
 			aws.String(cloudwatch.StatisticSampleCount)},
+
+		ExtendedStatistics: []*string{
+			aws.String("p99"),
+			aws.String("p95"),
+			aws.String("p50")},
 	}
 	return input
 }
