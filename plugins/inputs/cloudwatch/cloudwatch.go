@@ -1,7 +1,9 @@
 package cloudwatch
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -27,12 +29,14 @@ type (
 		Filename  string `toml:"shared_credential_file"`
 		Token     string `toml:"token"`
 
+		StartDate   string            `toml:"start_date"`
 		Period      internal.Duration `toml:"period"`
 		Delay       internal.Duration `toml:"delay"`
 		Namespace   string            `toml:"namespace"`
 		Metrics     []*Metric         `toml:"metrics"`
 		CacheTTL    internal.Duration `toml:"cache_ttl"`
 		RateLimit   int               `toml:"ratelimit"`
+		startTime   time.Time
 		client      cloudwatchClient
 		metricCache *MetricCache
 	}
@@ -99,6 +103,9 @@ func (c *CloudWatch) SampleConfig() string {
   ## Configure the TTL for the internal cache of metrics.
   ## Defaults to 1 hr if not specified
   #cache_ttl = "10m"
+
+  ## Load from the past. Specify in shortForm format ("02/01/2006", dd/mm/yyyy)
+  # start_date = ""02/01/2006""
 
   ## Metric Statistic Namespace (required)
   namespace = "AWS/ELB"
@@ -186,7 +193,37 @@ func (c *CloudWatch) Gather(acc telegraf.Accumulator) error {
 		return err
 	}
 
+	// This super block will go into another function
 	now := time.Now()
+	start := time.Time{}
+	end := time.Time{}
+
+	log.Printf("D! startTime %s", c.startTime)
+	if c.startTime.IsZero() {
+		log.Printf("D! startTime is zero, loading defaults now")
+
+		start = now.Add(-c.Period.Duration - c.Delay.Duration)
+		end = start.Add(c.Period.Duration)
+	} else {
+		log.Printf("D! calculate start and end")
+
+		start = c.startTime
+		// Add a full day
+		end = start.AddDate(0, 0, 1)
+
+		// Check we are not asking for the future
+		if end.Sub(now) > 0 {
+			log.Printf("D! end future %s", end)
+			log.Printf("D! do not pass the future")
+			end = now
+		}
+		// Update the startTime so we do not overlap
+		c.startTime = end
+	}
+
+	log.Printf("D! new startTime %s", c.startTime)
+	log.Printf("D! start %s", start)
+	log.Printf("D! end %s", end)
 
 	// limit concurrency or we can easily exhaust user connection limit
 	// see cloudwatch API request limits:
@@ -199,8 +236,9 @@ func (c *CloudWatch) Gather(acc telegraf.Accumulator) error {
 		<-lmtr.C
 		go func(inm *cloudwatch.Metric) {
 			defer wg.Done()
-			acc.AddError(c.gatherMetric(acc, inm, now))
+			acc.AddError(c.gatherMetric(acc, inm, start, end))
 		}(m)
+
 	}
 	wg.Wait()
 
@@ -232,6 +270,20 @@ func (c *CloudWatch) initializeCloudWatch() error {
 	}
 	configProvider := credentialConfig.Credentials()
 
+	if c.StartDate != "" {
+		const shortForm = "02/01/2006"
+		err := errors.New("")
+		c.startTime, err = time.Parse(shortForm, c.StartDate)
+		if err != nil {
+			log.Printf("D! startDate could not be parsed %s - %s", c.StartDate, err)
+			log.Printf("E! startDate could not be parsed %s - %s", c.StartDate, err)
+		}
+	} else {
+		c.startTime = time.Time{}
+	}
+
+	log.Printf("D! startDate %s", c.StartDate)
+	log.Printf("D! startTime %s", c.startTime)
 	c.client = cloudwatch.New(configProvider)
 	return nil
 }
@@ -278,12 +330,9 @@ func (c *CloudWatch) fetchNamespaceMetrics() ([]*cloudwatch.Metric, error) {
 /*
  * Gather given Metric and emit any error
  */
-func (c *CloudWatch) gatherMetric(
-	acc telegraf.Accumulator,
-	metric *cloudwatch.Metric,
-	now time.Time,
-) error {
-	params := c.getStatisticsInput(metric, now)
+func (c *CloudWatch) gatherMetric(acc telegraf.Accumulator, metric *cloudwatch.Metric, start time.Time, end time.Time) error {
+
+	params := c.getStatisticsInput(metric, start, end)
 	resp, err := c.client.GetMetricStatistics(params)
 	if err != nil {
 		return err
@@ -356,11 +405,10 @@ func snakeCase(s string) string {
 /*
  * Map Metric to *cloudwatch.GetMetricStatisticsInput for given timeframe
  */
-func (c *CloudWatch) getStatisticsInput(metric *cloudwatch.Metric, now time.Time) *cloudwatch.GetMetricStatisticsInput {
-	end := now.Add(-c.Delay.Duration)
+func (c *CloudWatch) getStatisticsInput(metric *cloudwatch.Metric, start time.Time, end time.Time) *cloudwatch.GetMetricStatisticsInput {
 
 	input := &cloudwatch.GetMetricStatisticsInput{
-		StartTime:  aws.Time(end.Add(-c.Period.Duration)),
+		StartTime:  aws.Time(start),
 		EndTime:    aws.Time(end),
 		MetricName: metric.MetricName,
 		Namespace:  metric.Namespace,
