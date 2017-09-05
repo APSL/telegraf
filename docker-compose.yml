@@ -1,0 +1,7 @@
+version: "2"
+
+services:
+
+  telegraf:
+    build: .
+    image: hub.apsl.net/library/telegraf:1.3.5-alpine-cloudwatch
